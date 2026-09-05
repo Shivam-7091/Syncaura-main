@@ -1,7 +1,6 @@
 import { useEffect, useState, useMemo } from "react";
 import { useSelector, useDispatch } from "react-redux";
 import { Funnel, Plus, Search } from "lucide-react";
-import RecentActivity from "../components/notice/RecentActivity";
 import NotificationRow from "../components/notice/NotificationRow";
 
 import NewNoticeModal from "../components/notice/NewNoticeModel";
@@ -116,9 +115,6 @@ const Notice = () => {
         </div>
       </div>
 
-      <div className="flex items-center justify-center w-full px-2 sm:px-10">
-        <RecentActivity />
-      </div>
 
       <div className="flex flex-col items-start justify-center w-full">
         <div className="flex items-center justify-start w-full px-2 md:px-10">
