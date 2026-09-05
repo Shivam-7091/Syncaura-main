@@ -26,6 +26,7 @@ export const auth = async (req, res, next) => {
 
 
     const user = result.rows[0];
+    delete user.password_hash;
     req.user = user;
     
     // Map Google tokens if needed
@@ -38,13 +39,17 @@ export const auth = async (req, res, next) => {
     };
     console.log("Google Tokens:", req.googleTokens);
     
-    next();
+    return next();
   } catch (err) {
-    console.error('Auth error:', err);
+    if (err.name === 'TokenExpiredError') {
+      console.warn(`[Auth] Access token expired for ${req.method} ${req.originalUrl}`);
+    } else {
+      console.error('Auth error:', err.message);
+    }
     return res.status(401).json({
-    message: "Invalid or expired token",
-    error: err.message
-  });
+      message: "Invalid or expired token",
+      error: err.message
+    });
   }
 }
 

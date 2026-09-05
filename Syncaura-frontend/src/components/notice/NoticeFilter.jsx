@@ -6,107 +6,82 @@ import { useTranslation } from "react-i18next";
 
 export default function NoticeFilter({ onClose, onApply }) {
   const { t } = useTranslation();
-  const [status, setStatus] = useState(t("yes", "Yes"));
-  const [type, setType] = useState(t("general_camel", "General"));
+  const [type, setType] = useState("All");
   const [date, setDate] = useState("");
-  const items = [t("yes", "Yes"), t("no", "No")];
 
   const applyFilter = (changes = {}) => {
-  onApply({
-    status: changes.status ?? status,
-    type: changes.type ?? type,
-    date: changes.date ?? date,
-  });
-};
+    onApply({
+      type: changes.type ?? type,
+      date: changes.date ?? date,
+    });
+  };
 
   return (
-    <div className="w-full px-4 sm:px-6 lg:px-10">
+    <div className="w-full px-4 sm:px-6 lg:px-10 relative">
+      <motion.button
+        initial={{ opacity: 0, scale: 0.5, rotate: -90 }}
+        animate={{ opacity: 1, scale: 1, rotate: 0 }}
+        exit={{ opacity: 0, scale: 0.5, rotate: 90 }}
+        whileHover={{ scale: 1.15, rotate: 90 }}
+        whileTap={{ scale: 0.9 }}
+        transition={{ type: "spring", stiffness: 400, damping: 20 }}
+        className="absolute top-2 right-6 sm:right-8 lg:right-12 z-50 p-2 rounded-full cursor-pointer"
+        onClick={() => {
+          onApply(null);
+          onClose();
+        }}
+      >
+        <X className="text-black dark:text-white size-5" />
+      </motion.button>
       <motion.div
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4, ease: "easeOut" }}
         className="w-full bg-white dark:bg-black rounded-2xl shadow-[0_0_10px_1px_#ACACAC33] p-4 sm:p-6 flex flex-col lg:flex-row gap-4 lg:gap-6 items-stretch justify-center lg:items-center"
       >
-        <motion.button
-          initial={{ opacity: 0, scale: 0.5, rotate: -90 }}
-          animate={{ opacity: 1, scale: 1, rotate: 0 }}
-          exit={{ opacity: 0, scale: 0.5, rotate: 90 }}
-          whileHover={{ scale: 1.15, rotate: 90 }}
-          whileTap={{ scale: 0.9 }}
-          transition={{ type: "spring", stiffness: 400, damping: 20 }}
-          className="fixed top-4 right-10 md:right-15 z-100"
-          onClick={() => {
-            onApply(null);
-            onClose();
-          }}
-        >
-          <X className="text-black dark:text-white size-5" />
-        </motion.button>
 
         {/* Date Range */}
-        <div className="flex flex-col items-center justify-center gap-2 w-full lg:w-1/4">
+        <div className="flex flex-col items-start justify-center gap-2 w-full lg:w-1/3">
           <label className="text-sm font-semibold w-full text-gray-700 dark:text-gray-300">
-            {t("date_range", "Date Range")}
+            {t("date_range", "Date Range (On or After)")}
           </label>
           <input
             type="date"
             value={date}
             onChange={(e) => {
-            const value = e.target.value;
-            setDate(value);
-            applyFilter({ date: value });
+              const value = e.target.value;
+              setDate(value);
+              applyFilter({ date: value });
             }}
-            className="w-full rounded-full border border-gray-200 px-4 py-2 pr-10 text-sm text-[#898888]
+            className="w-full rounded-full border border-gray-200 px-4 py-2 text-sm text-[#898888]
               bg-white dark:bg-[#2E2F2F]
               dark:text-gray-200 focus:outline-none focus:ring-2 focus:ring-blue-500 date-input"
           />
         </div>
 
-        {/* Type */}
-        <div className="flex flex-col gap-2 w-full lg:w-1/4">
+        {/* Category / Type */}
+        <div className="flex flex-col gap-2 w-full lg:w-1/3">
           <FilterDropdown
-            options={[t("general_camel", "General"), t("academic_camel", "Academic"), t("it_camel", "IT"), t("facility_camel", "Facility")]}
+            options={["All", "General", "Academic", "IT", "Facility", "Event", "Exam"]}
             startVal={type}
-            label={t("type", "Type")}
-            onChange={setType}
+            label={t("category", "Category / Type")}
+            onChange={(val) => {
+              setType(val);
+              applyFilter({ type: val });
+            }}
           />
         </div>
 
-        {/* Status */}
-        <div className="flex flex-col gap-2 w-full lg:w-1/4">
-          <label className="text-sm font-semibold text-gray-700 dark:text-gray-300">
-            {t("viewed", "Viewed")}
-          </label>
-          <div className="flex flex-wrap gap-2">
-            {items.map((item) => (
-              <button
-                onClick={() => {
-                setStatus(item);
-                applyFilter({ status: item });
-                }}
-                key={item}
-                className={`btn-hover px-4 py-1.5 rounded-full text-sm border ${
-                  status === item
-                    ? "border-blue-500 text-blue-500 dark:border-[#73FBFD] dark:text-[#73FBFD]"
-                    : "border-gray-300 text-gray-500"
-                }`}
-              >
-                {item}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        <div className="w-full lg:w-auto flex items-end">
+        <div className="w-full lg:w-auto flex items-end ml-auto">
           <motion.button
             onClick={() => {
-              onApply({ status, type, date });
+              onApply({ type, date });
               onClose();
             }}
             whileHover={{ scale: 1.05 }}
             whileTap={{ scale: 0.95 }}
             transition={{ type: "spring", stiffness: 400, damping: 20 }}
-            className="w-full lg:w-auto bg-blue-600 dark:bg-[#73FBFD] dark:text-black text-white font-medium px-5 py-3 rounded-full shadow-sm text-sm"
+            className="w-full lg:w-auto bg-blue-600 dark:bg-[#73FBFD] dark:text-black text-white font-medium px-6 py-2.5 rounded-full shadow-sm text-sm cursor-pointer"
           >
             {t("apply_filters", "Apply Filters")}
           </motion.button>

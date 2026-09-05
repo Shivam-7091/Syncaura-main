@@ -20,6 +20,7 @@ import api from "../config/axios";
 
 import LeaveModel from "../components/AttendanceLeave/LeaveModel";
 import AttendanceLeaveFilter from "../components/AttendanceLeave/AttendanceLeaveFilter";
+import AdminAttendanceList from "../components/AttendanceLeave/AdminAttendanceList";
 import { toast } from "react-toastify";
 
 const initialAttendanceStats = [
@@ -47,7 +48,7 @@ const initialAttendanceStats = [
   },
   {
     title: "Work From Home",
-    value: 3,
+    value: 0,
     borderColor: "border-[#2461E6] dark:border-[#73FBFD]",
     icon: <Laptop className="size-3.5 text-[#2461E6] dark:text-[#73FBFD]" />,
   },
@@ -79,6 +80,7 @@ const AttendanceLeave = () => {
   const currentUser = user || storedUser;
   const currentRole = (currentUser?.role || "").toLowerCase();
   const isAdminOrCoAdmin = currentRole === "admin" || currentRole === "co-admin" || currentRole === "coadmin";
+  const [activeAdminView, setActiveAdminView] = useState("leaves"); // "leaves" | "attendance"
 
   const [selectedId, setSelectedId] = useState(0);
   const [openModel, setOpenModel] = useState(false);
@@ -131,8 +133,17 @@ const AttendanceLeave = () => {
         return next;
       });
     },
-    [leaveStorageKey],
+    [leaveStorageKey]
   );
+
+  const [leaveStats, setLeaveStats] = useState({
+    total: 0,
+    approved: 0,
+    pending: 0,
+    rejected: 0,
+    approvedDays: 0,
+    pendingDays: 0,
+  });
 
   const fetchLeaves = useCallback(async () => {
     try {
@@ -156,6 +167,14 @@ const AttendanceLeave = () => {
 
         const data = response.data;
         setTotalPages(data.totalPages || 1);
+
+        if (data.stats || data.balance) {
+          setLeaveStats(data.stats || data.balance);
+        } else {
+          api.get("/leave/balance").then(bRes => {
+            if (bRes.data?.data) setLeaveStats(bRes.data.data);
+          }).catch(() => {});
+        }
 
         if (Array.isArray(data.leaves)) {
           const formattedLeaves = data.leaves.map((leave) => ({
@@ -200,6 +219,34 @@ const AttendanceLeave = () => {
     }
   }, [user, currentPage, leaveStorageKey]);
 
+
+  // Helper to fetch user's current browser location
+  const getUserLocation = () => {
+    return new Promise((resolve, reject) => {
+      if (!navigator.geolocation) {
+        return reject(new Error("Geolocation is not supported by your browser."));
+      }
+
+      navigator.geolocation.getCurrentPosition(
+        (position) => {
+          resolve({
+            latitude: position.coords.latitude,
+            longitude: position.coords.longitude,
+            accuracy: position.coords.accuracy,
+          });
+        },
+        (error) => {
+          reject(error);
+        },
+        {
+          enableHighAccuracy: true,
+          timeout: 10000,
+          maximumAge: 0,
+        }
+      );
+    });
+  };
+
   useEffect(() => {
     const emptyState = getInitialAttendanceState();
 
@@ -228,6 +275,57 @@ const AttendanceLeave = () => {
       setSelectedTab(todayRecord.in && !todayRecord.out ? "Check-Out" : "Check-In");
     }
 
+    // Task 6: Keep correct attendance status after refresh by fetching from backend API
+    const syncStatusWithBackend = async () => {
+      try {
+        const now = new Date();
+        const month = now.getMonth() + 1;
+        const year = now.getFullYear();
+        const response = await api.get(`/attendance/my-attendance?month=${month}&year=${year}`);
+        if (response.data && response.data.success && Array.isArray(response.data.records)) {
+          const todayStr = getToday();
+          const todayRec = response.data.records.find((r) => r.date === todayStr);
+          const isSample = todayRec && String(todayRec.id).startsWith("sample-");
+
+          if (todayRec && !isSample && isCurrent) {
+            const inTime = (todayRec.check_in_time && todayRec.check_in_time !== "-") ? todayRec.check_in_time : null;
+            const outTime = (todayRec.check_out_time && todayRec.check_out_time !== "-") ? todayRec.check_out_time : null;
+            setCheckInTime(inTime);
+            setCheckOutTime(outTime);
+            setSelectedTab(inTime && !outTime ? "Check-Out" : "Check-In");
+
+            const currentRecords = { ...attendanceStateRef.current.records };
+            currentRecords[todayStr] = {
+              ...currentRecords[todayStr],
+              in: inTime,
+              out: outTime,
+              status: todayRec.status || "Present",
+            };
+            attendanceStateRef.current.records = currentRecords;
+            try {
+              localStorage.setItem(attendanceStorageKey, JSON.stringify(attendanceStateRef.current));
+            } catch { /* ignore */ }
+          } else if (isCurrent && (!todayRec || isSample)) {
+            // No real record marked for today yet in DB - keep state ready for Check-In
+            setCheckInTime(null);
+            setCheckOutTime(null);
+            setSelectedTab("Check-In");
+
+            const currentRecords = { ...attendanceStateRef.current.records };
+            delete currentRecords[todayStr];
+            attendanceStateRef.current.records = currentRecords;
+            try {
+              localStorage.setItem(attendanceStorageKey, JSON.stringify(attendanceStateRef.current));
+            } catch { /* ignore */ }
+          }
+        }
+      } catch (err) {
+        console.warn("Could not sync attendance status from backend:", err.message);
+      }
+    };
+
+    syncStatusWithBackend();
+
     return () => {
       isCurrent = false;
     };
@@ -245,7 +343,7 @@ const AttendanceLeave = () => {
   const canCheckIn = !checkInTime;
   const canCheckOut = Boolean(checkInTime && !checkOutTime);
 
-  const handleConfirmAttendance = () => {
+  const handleConfirmAttendance = async () => {
     if (selectedTab === "Check-In" && !canCheckIn) {
       toast.info("You have already checked in for this date.");
       return;
@@ -261,70 +359,119 @@ const AttendanceLeave = () => {
     }
 
     setIsSubmitting(true);
-    const now = new Date();
-    const formattedTime = now.toLocaleTimeString([], {
-      hour: "2-digit",
-      minute: "2-digit",
-      hour12: true,
-    });
+
+    // Task 1 & 2: Ask for current location using browser location feature
+    let locationData;
+    try {
+      locationData = await getUserLocation();
+    } catch (geoErr) {
+      setIsSubmitting(false);
+      // Task 4: Handle Location Permission Error
+      if (geoErr.code === 1) { // PERMISSION_DENIED
+        toast.error("Location permission is required to mark office attendance.");
+      } else if (geoErr.code === 2) { // POSITION_UNAVAILABLE
+        toast.error("Location information is unavailable. Please enable GPS and try again.");
+      } else if (geoErr.code === 3) { // TIMEOUT
+        toast.error("Location request timed out. Please try again.");
+      } else {
+        toast.error(geoErr.message || "Location permission is required to mark office attendance.");
+      }
+      return;
+    }
 
     const isToday = attendanceDate === getToday();
+    const endpoint = selectedTab === "Check-In" ? "/attendance/check-in" : "/attendance/check-out";
 
-    setTimeout(() => {
-      const currentRecords = { ...attendanceStateRef.current.records };
-      const selectedRecord = currentRecords[attendanceDate] || {};
+    // Task 1 & 2: Send latitude, longitude, and location accuracy to backend
+    const payload = {
+      latitude: locationData.latitude,
+      longitude: locationData.longitude,
+      accuracy: locationData.accuracy,
+      date: attendanceDate,
+    };
 
-      if (selectedTab === "Check-In") {
-        currentRecords[attendanceDate] = {
-          ...selectedRecord,
-          in: formattedTime,
-          status: "Present",
-        };
-        if (!selectedRecord.in) {
-          attendanceStateRef.current.presentDays += 1;
+    try {
+      const response = await api.post(endpoint, payload);
+
+      if (response.data && response.data.success) {
+        const serverTime =
+          response.data.data?.check_in_time ||
+          response.data.data?.check_out_time ||
+          new Date().toLocaleTimeString([], {
+            hour: "2-digit",
+            minute: "2-digit",
+            hour12: true,
+          });
+
+        const currentRecords = { ...attendanceStateRef.current.records };
+        const selectedRecord = currentRecords[attendanceDate] || {};
+
+        if (selectedTab === "Check-In") {
+          currentRecords[attendanceDate] = {
+            ...selectedRecord,
+            in: serverTime,
+            status: "Present",
+            lat: locationData.latitude,
+            lng: locationData.longitude,
+            accuracy: locationData.accuracy,
+          };
+          if (!selectedRecord.in) {
+            attendanceStateRef.current.presentDays += 1;
+          }
+          setCheckInTime(serverTime);
+          setSelectedTab("Check-Out");
+          toast.success(
+            response.data.message ||
+              (isToday
+                ? `Checked in successfully at ${serverTime}!`
+                : `Checked in for ${attendanceDate} at ${serverTime}!`)
+          );
+        } else {
+          currentRecords[attendanceDate] = {
+            ...selectedRecord,
+            out: serverTime,
+          };
+          setCheckOutTime(serverTime);
+          toast.success(
+            response.data.message ||
+              (isToday
+                ? `Checked out successfully at ${serverTime}!`
+                : `Checked out for ${attendanceDate} at ${serverTime}!`)
+          );
         }
-        setCheckInTime(formattedTime);
-        setSelectedTab("Check-Out");
-        toast.success(
-          isToday
-            ? `Checked in successfully at ${formattedTime}!`
-            : `Checked in for ${attendanceDate} at ${formattedTime}!`,
+
+        attendanceStateRef.current.records = currentRecords;
+
+        try {
+          localStorage.setItem(
+            attendanceStorageKey,
+            JSON.stringify(attendanceStateRef.current)
+          );
+        } catch {
+          // ignore storage quota issues
+        }
+
+        setAttendanceStats((prev) =>
+          prev.map((stat) =>
+            stat.title === "Present Days"
+              ? { ...stat, value: attendanceStateRef.current.presentDays }
+              : stat
+          )
         );
+
+        setShowPopup(false);
       } else {
-        currentRecords[attendanceDate] = {
-          ...selectedRecord,
-          out: formattedTime,
-        };
-        setCheckOutTime(formattedTime);
-        toast.success(
-          isToday
-            ? `Checked out successfully at ${formattedTime}!`
-            : `Checked out for ${attendanceDate} at ${formattedTime}!`,
-        );
+        // Task 5: Show Location Errors
+        toast.error(response.data?.message || "Attendance verification failed.");
       }
-
-      attendanceStateRef.current.records = currentRecords;
-
-      try {
-        localStorage.setItem(
-          attendanceStorageKey,
-          JSON.stringify(attendanceStateRef.current),
-        );
-      } catch {
-        // silently ignore quota issues
-      }
-
-      setAttendanceStats((prev) =>
-        prev.map((stat) =>
-          stat.title === "Present Days"
-            ? { ...stat, value: attendanceStateRef.current.presentDays }
-            : stat,
-        ),
-      );
-
+    } catch (apiErr) {
+      console.warn("Attendance API error response:", apiErr);
+      const backendMsg = apiErr.response?.data?.message || apiErr.response?.data?.error || apiErr.message;
+      // Task 5: Show Location Errors (e.g. "You are outside the workplace attendance area.")
+      toast.error(backendMsg || "Attendance location verification failed. Please try again.");
+    } finally {
       setIsSubmitting(false);
-      setShowPopup(false);
-    }, 1000);
+    }
   };
 
   useEffect(() => {
@@ -512,6 +659,37 @@ const AttendanceLeave = () => {
         </AnimatePresence>
       </div>
 
+      {isAdminOrCoAdmin && (
+        <div className="flex items-center gap-2.5 px-5 sm:px-10 mt-3 mb-1">
+          <button
+            type="button"
+            onClick={() => setActiveAdminView("leaves")}
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+              activeAdminView === "leaves"
+                ? "bg-blue-600 text-white dark:bg-[#73FBFD] dark:text-black shadow-xs"
+                : "bg-gray-100 dark:bg-[#1E1E1E] text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-[#2A2A2A]"
+            }`}
+          >
+            Leave Requests
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveAdminView("attendance")}
+            className={`px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+              activeAdminView === "attendance"
+                ? "bg-blue-600 text-white dark:bg-[#73FBFD] dark:text-black shadow-xs"
+                : "bg-gray-100 dark:bg-[#1E1E1E] text-gray-600 dark:text-gray-400 hover:bg-gray-200 dark:hover:bg-[#2A2A2A]"
+            }`}
+          >
+            Employee Daily Attendance
+          </button>
+        </div>
+      )}
+
+      {isAdminOrCoAdmin && activeAdminView === "attendance" ? (
+        <AdminAttendanceList defaultDate={attendanceDate} />
+      ) : (
+        <>
       <motion.div
         initial={{ opacity: 0, x: -40 }}
         animate={{ opacity: 1, x: 0 }}
@@ -613,7 +791,7 @@ const AttendanceLeave = () => {
                     <div className="flex items-center justify-between gap-3">
                       {["Check-In", "Check-Out"].map((item) => {
                         const isSelected = selectedTab === item;
-                        const isDisabled = item === "Check-In" ? !canCheckIn : !canCheckOut;
+                        const isDisabled = isSubmitting || (item === "Check-In" ? !canCheckIn : !canCheckOut);
 
                         return (
                           <motion.button
@@ -652,7 +830,7 @@ const AttendanceLeave = () => {
                       {isSubmitting ? (
                         <>
                           <Loader className="size-4 animate-spin" />
-                          Confirming...
+                          Verifying location...
                         </>
                       ) : selectedTab === "Check-In" ? (
                         canCheckIn ? (
@@ -676,6 +854,48 @@ const AttendanceLeave = () => {
         </div>
       </motion.div>
 
+      {/* Leave Status Summary Banner */}
+      {(!isAdminOrCoAdmin || activeAdminView === "leaves") && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 px-4 mt-4 w-full">
+          <div className="flex items-center gap-3 p-3.5 rounded-2xl bg-blue-50/60 dark:bg-[#73FBFD]/10 border border-blue-100 dark:border-[#73FBFD]/20">
+            <span className="text-xl">📋</span>
+            <div>
+              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wide">Total Requests</p>
+              <p className="text-base font-bold text-blue-700 dark:text-[#73FBFD]">
+                {leaveStats.total || leaveData.length} Requests
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-3 p-3.5 rounded-2xl bg-emerald-50/60 dark:bg-emerald-950/20 border border-emerald-100 dark:border-emerald-800/30">
+            <span className="text-xl">✅</span>
+            <div>
+              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wide">Approved</p>
+              <p className="text-base font-bold text-emerald-700 dark:text-emerald-400">
+                {leaveStats.approved !== undefined ? leaveStats.approved : leaveData.filter(l => (l.status || '').toLowerCase() === 'approved').length} Leaves
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-3 p-3.5 rounded-2xl bg-amber-50/60 dark:bg-amber-950/20 border border-amber-100 dark:border-amber-800/30">
+            <span className="text-xl">⏳</span>
+            <div>
+              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wide">Pending</p>
+              <p className="text-base font-bold text-amber-700 dark:text-amber-400">
+                {leaveStats.pending !== undefined ? leaveStats.pending : leaveData.filter(l => (l.status || '').toLowerCase() === 'pending').length} Requests
+              </p>
+            </div>
+          </div>
+          <div className="flex items-center gap-3 p-3.5 rounded-2xl bg-rose-50/60 dark:bg-rose-950/20 border border-rose-100 dark:border-rose-800/30">
+            <span className="text-xl">❌</span>
+            <div>
+              <p className="text-[10px] font-bold text-gray-400 uppercase tracking-wide">Rejected</p>
+              <p className="text-base font-bold text-rose-700 dark:text-rose-400">
+                {leaveStats.rejected !== undefined ? leaveStats.rejected : leaveData.filter(l => (l.status || '').toLowerCase() === 'rejected').length} Requests
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="hidden md:flex flex-col flex-1 w-full mt-5 overflow-y-auto overflow-x-hidden no-scrollbar">
         <div
           className="sticky top-0 z-20
@@ -685,23 +905,20 @@ const AttendanceLeave = () => {
           shadow-[0_4px_10px_0_rgba(0,0,0,0.25)]
           px-10 py-4"
         >
-          <h1 className="uppercase text-xs font-semibold dark:text-[#FFFFFF] text-[#000000] w-[20%] text-left px-3">
+          <h1 className="uppercase text-xs font-semibold dark:text-[#FFFFFF] text-[#000000] w-[22%] text-left px-3">
             Applicant
           </h1>
-          <h1 className="uppercase text-xs font-semibold dark:text-[#FFFFFF] text-[#000000] w-[15%] text-center px-2">
+          <h1 className="uppercase text-xs font-semibold dark:text-[#FFFFFF] text-[#000000] w-[16%] text-center px-2">
             Leave Type
           </h1>
-          <h1 className="uppercase text-xs font-semibold dark:text-[#FFFFFF] text-[#000000] w-[20%] text-center px-2">
+          <h1 className="uppercase text-xs font-semibold dark:text-[#FFFFFF] text-[#000000] w-[22%] text-center px-2">
             Duration
           </h1>
-          <h1 className="uppercase text-xs font-semibold dark:text-[#FFFFFF] text-[#000000] w-[23%] text-left px-3">
+          <h1 className="uppercase text-xs font-semibold dark:text-[#FFFFFF] text-[#000000] w-[24%] text-left px-3">
             Reason
           </h1>
-          <h1 className="uppercase text-xs font-semibold dark:text-[#FFFFFF] text-[#000000] w-[14%] text-center">
+          <h1 className="uppercase text-xs font-semibold dark:text-[#FFFFFF] text-[#000000] w-[16%] text-center">
             Status
-          </h1>
-          <h1 className="uppercase text-xs font-semibold dark:text-[#FFFFFF] text-[#000000] w-[8%] text-center">
-            Actions
           </h1>
         </div>
 
@@ -760,14 +977,18 @@ const AttendanceLeave = () => {
           onDeleteLeave={handleDeleteLeave}
         />
       </div>
+      </>
+      )}
 
-      <button
-        onClick={handleOpenCreateModal}
-        className="fixed cursor-pointer bottom-8 right-8 rounded-2xl font-semibold px-6 py-3 z-30 bg-[#2457C5] text-[#EDEDED] dark:bg-[#73FBFD] dark:text-[#000000] text-base lg:text-xl btn-hover flex items-center gap-2 shadow-lg"
-      >
-        <Plus className="size-5 lg:size-6" />
-        <span>Apply Leave</span>
-      </button>
+      {(!isAdminOrCoAdmin || activeAdminView === "leaves") && (
+        <button
+          onClick={handleOpenCreateModal}
+          className="fixed cursor-pointer bottom-8 right-8 rounded-2xl font-semibold px-6 py-3 z-30 bg-[#2457C5] text-[#EDEDED] dark:bg-[#73FBFD] dark:text-[#000000] text-base lg:text-xl btn-hover flex items-center gap-2 shadow-lg"
+        >
+          <Plus className="size-5 lg:size-6" />
+          <span>Apply Leave</span>
+        </button>
+      )}
 
       {openModel && (
         <LeaveModel

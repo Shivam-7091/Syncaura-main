@@ -1,4 +1,63 @@
 import pool from '../config/db.js';
+import { createNotification } from '../utils/notifications.js';
+
+export const getLeaveBalanceHelper = async (userId, isAdmin = false) => {
+  let query = `SELECT from_date, to_date, status, leave_type FROM leaves`;
+  let params = [];
+  if (!isAdmin && userId) {
+    query += ` WHERE user_id = $1`;
+    params = [userId];
+  }
+
+  const leavesRes = await pool.query(query, params);
+
+  let total = leavesRes.rowCount || 0;
+  let approved = 0;
+  let pending = 0;
+  let rejected = 0;
+  let approvedDays = 0;
+  let pendingDays = 0;
+  let totalDays = 0;
+
+  for (const l of leavesRes.rows) {
+    const from = new Date(l.from_date);
+    const to = new Date(l.to_date);
+    const days = Math.max(1, Math.ceil((to - from) / (1000 * 60 * 60 * 24)) + 1);
+    totalDays += days;
+
+    const st = String(l.status || '').toLowerCase();
+    if (st === 'approved') {
+      approved += 1;
+      approvedDays += days;
+    } else if (st === 'pending') {
+      pending += 1;
+      pendingDays += days;
+    } else if (st === 'rejected') {
+      rejected += 1;
+    }
+  }
+
+  return {
+    total,
+    approved,
+    pending,
+    rejected,
+    approvedDays,
+    pendingDays,
+    totalDays
+  };
+};
+
+export const getLeaveBalance = async (req, res) => {
+  try {
+    const role = (req.user.role || '').toLowerCase();
+    const isAdmin = role === 'admin' || role === 'co-admin' || role === 'coadmin';
+    const stats = await getLeaveBalanceHelper(req.user.id, isAdmin);
+    return res.status(200).json({ success: true, data: stats, stats });
+  } catch (error) {
+    return res.status(500).json({ success: false, message: error.message });
+  }
+};
 
 export const applyLeave = async (req, res) => {
   try {
@@ -228,11 +287,14 @@ export const getMyLeaves = async (req, res) => {
       [userId, limit, offset]
     );
 
+    const balance = await getLeaveBalanceHelper(userId);
+
     res.status(200).json({
       leaves: result.rows,
       currentPage: page,
       totalPages: Math.ceil(totalLeaves / limit),
       totalLeaves,
+      balance,
     });
 
   } catch (error) {
@@ -262,11 +324,15 @@ export const getAllLeaves = async (req, res) => {
       [limit, offset]
     );
 
+    const stats = await getLeaveBalanceHelper(null, true);
+
     res.status(200).json({
       leaves: result.rows,
       currentPage: page,
       totalPages: Math.ceil(totalLeaves / limit),
       totalLeaves,
+      balance: stats,
+      stats,
     });
 
   } catch (error) {
@@ -299,10 +365,25 @@ export const updateLeaveStatus = async (req, res) => {
       return res.status(404).json({ message: "Leave not found" });
     }
 
+    const updatedLeave = result.rows[0];
+
+    try {
+      await createNotification({
+        type: 'LEAVE_STATUS_UPDATE',
+        title: `Leave Request ${normalizedStatus.toUpperCase()}`,
+        message: `Your leave request for ${new Date(updatedLeave.from_date).toLocaleDateString()} - ${new Date(updatedLeave.to_date).toLocaleDateString()} has been marked as ${normalizedStatus}.`,
+        recipients: updatedLeave.user_id,
+        relatedEntity: { entityType: 'leave', entityId: updatedLeave.id },
+        actionUrl: '/attendance-leave'
+      });
+    } catch (notifErr) {
+      console.warn("Notification trigger failed:", notifErr.message);
+    }
+
     res.status(200).json({
       success: true,
       message: `Leave status updated to ${normalizedStatus}`,
-      leave: result.rows[0]
+      leave: updatedLeave
     });
   } catch (error) {
     console.error("Error updating leave status:", error);
@@ -321,7 +402,22 @@ export const approveLeave = async (req, res) => {
       return res.status(404).json({ message: "Leave not found" });
     }
 
-    res.status(200).json({ success: true, message: "Leave approved successfully", leave: result.rows[0] });
+    const updatedLeave = result.rows[0];
+
+    try {
+      await createNotification({
+        type: 'LEAVE_APPROVED',
+        title: 'Leave Request APPROVED',
+        message: `Your leave request for ${new Date(updatedLeave.from_date).toLocaleDateString()} - ${new Date(updatedLeave.to_date).toLocaleDateString()} has been approved.`,
+        recipients: updatedLeave.user_id,
+        relatedEntity: { entityType: 'leave', entityId: updatedLeave.id },
+        actionUrl: '/attendance-leave'
+      });
+    } catch (notifErr) {
+      console.warn("Notification trigger failed:", notifErr.message);
+    }
+
+    res.status(200).json({ success: true, message: "Leave approved successfully", leave: updatedLeave });
   } catch (error) {
     console.error("Error approving leave:", error);
     res.status(500).json({ message: "Error approving leave" });
@@ -339,7 +435,22 @@ export const rejectLeave = async (req, res) => {
       return res.status(404).json({ message: "Leave not found" });
     }
 
-    res.status(200).json({ success: true, message: "Leave rejected successfully", leave: result.rows[0] });
+    const updatedLeave = result.rows[0];
+
+    try {
+      await createNotification({
+        type: 'LEAVE_REJECTED',
+        title: 'Leave Request REJECTED',
+        message: `Your leave request for ${new Date(updatedLeave.from_date).toLocaleDateString()} - ${new Date(updatedLeave.to_date).toLocaleDateString()} has been rejected.`,
+        recipients: updatedLeave.user_id,
+        relatedEntity: { entityType: 'leave', entityId: updatedLeave.id },
+        actionUrl: '/attendance-leave'
+      });
+    } catch (notifErr) {
+      console.warn("Notification trigger failed:", notifErr.message);
+    }
+
+    res.status(200).json({ success: true, message: "Leave rejected successfully", leave: updatedLeave });
   } catch (error) {
     console.error("Error rejecting leave:", error);
     res.status(500).json({ message: "Error rejecting leave" });
